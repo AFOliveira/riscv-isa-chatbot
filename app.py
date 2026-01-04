@@ -116,7 +116,7 @@ def ask(question, api_key):
         client = anthropic.Anthropic(api_key=api_key)
         messages = [{"role": "user", "content": question}]
         
-        response = client.messages.create(model="claude-3-5-haiku-20241022", max_tokens=4096, system=SYSTEM, tools=TOOLS, messages=messages)
+        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=4096, system=SYSTEM, tools=TOOLS, messages=messages)
         
         while response.stop_reason == "tool_use":
             tool_results = []
@@ -126,7 +126,7 @@ def ask(question, api_key):
                     tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result, default=str)})
             messages.append({"role": "assistant", "content": response.content})
             messages.append({"role": "user", "content": tool_results})
-            response = client.messages.create(model="claude-3-5-haiku-20241022", max_tokens=4096, system=SYSTEM, tools=TOOLS, messages=messages)
+            response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=4096, system=SYSTEM, tools=TOOLS, messages=messages)
         
         return "".join(b.text for b in response.content if hasattr(b, "text"))
     except anthropic.AuthenticationError:
