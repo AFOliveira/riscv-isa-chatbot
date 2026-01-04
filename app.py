@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""RISC-V ISA Chatbot - HuggingFace Spaces App"""
+"""RISC-V ISA Chatbot - HuggingFace Spaces App
+Data from RISC-V Unified Database (UDB): https://github.com/riscv-software-src/riscv-unified-db
+"""
 
 import json
 import os
@@ -17,6 +19,10 @@ API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 # Rate limiting: 20 questions per user (by session)
 MAX_QUESTIONS_PER_USER = 20
 user_usage = defaultdict(lambda: {"count": 0, "first_use": time.time()})
+
+# Available configs
+AVAILABLE_CONFIGS = ["RV64"]  # Add "RV32" when data is generated
+CURRENT_CONFIG = "RV64"
 
 _yaml_cache = {}
 _inst_index = []
@@ -129,7 +135,7 @@ def get_csr_details(name):
     return {"csr": load_yaml(DATA_DIR / csr["path"])}
 
 def get_stats():
-    return {"instructions": len(_inst_index), "csrs": len(_csr_index), "extensions": len(_ext_index)}
+    return {"config": CURRENT_CONFIG, "instructions": len(_inst_index), "csrs": len(_csr_index), "extensions": len(_ext_index)}
 
 
 TOOLS = [
@@ -159,12 +165,12 @@ TOOL_FNS = {
     "get_stats": get_stats
 }
 
-SYSTEM = """You are a helpful RISC-V ISA assistant with access to a comprehensive database of instructions, CSRs, and extensions.
+SYSTEM = """You are a helpful RISC-V ISA assistant with access to a comprehensive database of instructions, CSRs, and extensions from the RISC-V Unified Database (UDB).
 
 Use the available tools to look up accurate information. Provide clear, technical explanations with relevant details like encodings, assembly syntax, and extension dependencies."""
 
 
-def ask(question, request: gr.Request):
+def ask(question, config, request: gr.Request):
     if not API_KEY:
         return "API key not configured."
     if not _inst_index:
@@ -182,7 +188,7 @@ def ask(question, request: gr.Request):
     
     try:
         client = anthropic.Anthropic(api_key=API_KEY)
-        messages = [{"role": "user", "content": question}]
+        messages = [{"role": "user", "content": f"[Using {config} profile] {question}"}]
         
         response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=4096, system=SYSTEM, tools=TOOLS, messages=messages)
         
@@ -197,10 +203,10 @@ def ask(question, request: gr.Request):
             response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=4096, system=SYSTEM, tools=TOOLS, messages=messages)
         
         answer = "".join(b.text for b in response.content if hasattr(b, "text"))
-        return f"{answer}\n\n---\n*Questions remaining: {remaining}/{MAX_QUESTIONS_PER_USER}*"
+        return f"{answer}\n\n---\n*Profile: {config} | Questions remaining: {remaining}/{MAX_QUESTIONS_PER_USER}*"
     
     except anthropic.AuthenticationError:
-        user["count"] -= 1  # Don't count failed requests
+        user["count"] -= 1
         return "API key error."
     except Exception as e:
         user["count"] -= 1
@@ -212,19 +218,48 @@ build_indices()
 stats = get_stats()
 print(f"Loaded: {stats['instructions']} instructions, {stats['csrs']} CSRs, {stats['extensions']} extensions")
 
-demo = gr.Interface(
-    fn=ask,
-    inputs=gr.Textbox(label="Question", placeholder="Ask about RISC-V instructions, CSRs, or extensions...", lines=2),
-    outputs=gr.Textbox(label="Answer", lines=15),
-    title="RISC-V ISA Chatbot",
-    description=f"""Ask questions about RISC-V architecture. Powered by Claude Haiku 4.5.
+with gr.Blocks(title="RISC-V ISA Chatbot", theme=gr.themes.Soft()) as demo:
+    gr.Markdown(f"""
+# RISC-V ISA Chatbot
+
+Ask questions about RISC-V instructions, CSRs, and extensions. Powered by Claude Haiku 4.5.
+
+**Data Source:** [RISC-V Unified Database (UDB)](https://github.com/riscv-software-src/riscv-unified-db) - the official machine-readable RISC-V ISA specification.
 
 **Database:** {stats['instructions']} instructions | {stats['csrs']} CSRs | {stats['extensions']} extensions
 
-**Limit:** {MAX_QUESTIONS_PER_USER} questions per user""",
-    examples=["What instructions are in the M extension?", "Explain the mstatus CSR and its fields", "How does the ADD instruction work?", "List all vector extensions"],
-    flagging_mode="never",
-)
+**Limit:** {MAX_QUESTIONS_PER_USER} questions per user
+""")
+    
+    with gr.Row():
+        config = gr.Radio(
+            choices=AVAILABLE_CONFIGS,
+            value=CURRENT_CONFIG,
+            label="ISA Profile",
+            info="Select RISC-V base architecture"
+        )
+    
+    question = gr.Textbox(label="Question", placeholder="Ask about RISC-V instructions, CSRs, or extensions...", lines=2)
+    submit = gr.Button("Ask", variant="primary")
+    answer = gr.Textbox(label="Answer", lines=15, interactive=False)
+    
+    gr.Examples(
+        examples=[
+            ["What instructions are in the M extension?"],
+            ["Explain the mstatus CSR and its fields"],
+            ["How does the ADD instruction work?"],
+            ["List all vector extensions"],
+        ],
+        inputs=question,
+    )
+    
+    submit.click(fn=ask, inputs=[question, config], outputs=answer)
+    question.submit(fn=ask, inputs=[question, config], outputs=answer)
+    
+    gr.Markdown("""
+---
+*Data from [RISC-V Unified Database](https://github.com/riscv-software-src/riscv-unified-db) by RISC-V International*
+""")
 
 if __name__ == "__main__":
     demo.launch()
