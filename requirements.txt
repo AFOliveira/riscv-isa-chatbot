@@ -1,4 +1,3 @@
 gradio==4.31.0
-gradio-client==0.16.1
 anthropic>=0.40.0
 pyyaml>=6.0
