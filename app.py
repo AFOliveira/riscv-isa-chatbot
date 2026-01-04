@@ -316,9 +316,8 @@ custom_css = """
 .answer-box {
     min-height: 300px;
     padding: 16px;
-    border: 1px solid #e5e7eb;
+    border: 1px solid var(--border-color-primary);
     border-radius: 8px;
-    background: #fafafa;
     overflow-y: auto;
 }
 """
