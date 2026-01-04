@@ -312,7 +312,18 @@ total_ext = max((len(d.get("ext_index", [])) for d in _config_data.values()), de
 
 print(f"Loaded configs: {', '.join(AVAILABLE_CONFIGS)}")
 
-with gr.Blocks(title="RISC-V ISA Chatbot", theme=gr.themes.Soft()) as demo:
+custom_css = """
+.answer-box {
+    min-height: 300px;
+    padding: 16px;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    background: #fafafa;
+    overflow-y: auto;
+}
+"""
+
+with gr.Blocks(title="RISC-V ISA Chatbot", theme=gr.themes.Soft(), css=custom_css) as demo:
     gr.Markdown(f"""
 # RISC-V ISA Chatbot
 
@@ -333,7 +344,8 @@ Ask questions about RISC-V instructions, CSRs, and extensions. Powered by Claude
 
     question = gr.Textbox(label="Question", placeholder="Ask about RISC-V instructions, CSRs, or extensions...", lines=2)
     submit = gr.Button("Ask", variant="primary")
-    answer = gr.Markdown(label="Answer")
+    gr.Markdown("**Answer**")
+    answer = gr.Markdown(value="*Ask a question above...*", elem_classes=["answer-box"])
 
     gr.Examples(
         examples=[
