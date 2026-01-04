@@ -10,6 +10,8 @@ import gradio as gr
 import yaml
 
 DATA_DIR = Path(__file__).parent / "data"
+API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
 _yaml_cache = {}
 _inst_index = []
 _csr_index = []
@@ -106,14 +108,14 @@ TOOL_FNS = {"search_instructions": search_instructions, "search_csrs": search_cs
 SYSTEM = "You are a RISC-V ISA assistant. Use tools to look up accurate information about instructions, CSRs, and extensions."
 
 
-def ask(question, api_key):
-    if not api_key:
-        return "Please provide your Anthropic API key."
+def ask(question):
+    if not API_KEY:
+        return "API key not configured. Please contact the administrator."
     if not _inst_index:
         return "Data not loaded."
     
     try:
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(api_key=API_KEY)
         messages = [{"role": "user", "content": question}]
         
         response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=4096, system=SYSTEM, tools=TOOLS, messages=messages)
@@ -130,7 +132,7 @@ def ask(question, api_key):
         
         return "".join(b.text for b in response.content if hasattr(b, "text"))
     except anthropic.AuthenticationError:
-        return "Invalid API key."
+        return "API key error. Please contact the administrator."
     except Exception as e:
         return f"Error: {e}"
 
@@ -142,17 +144,15 @@ print(f"Loaded: {stats['instructions']} instructions, {stats['csrs']} CSRs, {sta
 
 demo = gr.Interface(
     fn=ask,
-    inputs=[
-        gr.Textbox(label="Question", placeholder="Ask about RISC-V instructions, CSRs, or extensions...", lines=2),
-        gr.Textbox(label="Anthropic API Key", type="password", value=os.environ.get("ANTHROPIC_API_KEY", "")),
-    ],
-    outputs=gr.Textbox(label="Answer", lines=10),
+    inputs=gr.Textbox(label="Question", placeholder="Ask about RISC-V instructions, CSRs, or extensions...", lines=2),
+    outputs=gr.Textbox(label="Answer", lines=12),
     title="RISC-V ISA Chatbot",
-    description=f"Ask questions about RISC-V. Database: {stats['instructions']} instructions, {stats['csrs']} CSRs, {stats['extensions']} extensions.",
+    description=f"Ask questions about RISC-V. Powered by Claude Haiku 4.5.\n\n**Database:** {stats['instructions']} instructions | {stats['csrs']} CSRs | {stats['extensions']} extensions",
     examples=[
-        ["What instructions are in the M extension?", ""],
-        ["Explain the mstatus CSR", ""],
-        ["How does the ADD instruction work?", ""],
+        "What instructions are in the M extension?",
+        "Explain the mstatus CSR",
+        "How does the ADD instruction work?",
+        "List all vector extensions",
     ],
     flagging_mode="never",
 )
