@@ -328,7 +328,7 @@ with gr.Blocks(title="RISC-V ISA Chatbot", theme=gr.themes.Soft(), css=custom_cs
 
 Ask questions about RISC-V instructions, CSRs, and extensions. Powered by Claude Haiku 4.5.
 
-**Data Source:** [RISC-V Unified Database (UDB)](https://github.com/riscv-software-src/riscv-unified-db) - the official machine-readable RISC-V ISA specification.
+**Data Source:** [RISC-V Unified Database (UDB)](https://github.com/riscv-software-src/riscv-unified-db) - the centralized machine-readable RISC-V ISA specification.
 
 **Profiles:** {', '.join(AVAILABLE_CONFIGS)} | **Limit:** {MAX_QUESTIONS_PER_USER} questions per user
 """)
