@@ -333,7 +333,7 @@ Ask questions about RISC-V instructions, CSRs, and extensions. Powered by Claude
 
     question = gr.Textbox(label="Question", placeholder="Ask about RISC-V instructions, CSRs, or extensions...", lines=2)
     submit = gr.Button("Ask", variant="primary")
-    answer = gr.Textbox(label="Answer", lines=15, interactive=False)
+    answer = gr.Markdown(label="Answer")
 
     gr.Examples(
         examples=[
