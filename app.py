@@ -154,7 +154,7 @@ demo = gr.Interface(
         ["Explain the mstatus CSR", ""],
         ["How does the ADD instruction work?", ""],
     ],
-    allow_flagging="never",
+    flagging_mode="never",
 )
 
 if __name__ == "__main__":
