@@ -3,7 +3,7 @@
 Export RISC-V data from riscv-unified-db to the chatbot data directory.
 
 Usage:
-    python export_data.py                           # Auto-detect parent repo
+    python export_data.py                           # Export all available configs
     python export_data.py /path/to/riscv-unified-db # Specify path explicitly
     RISCV_UNIFIED_DB=/path/to/repo python export_data.py  # Via env var
 """
@@ -16,8 +16,8 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent
 TARGET_DIR = SCRIPT_DIR / "data"
 
-# Default CPU config
-CONFIG = os.environ.get("RISCV_CPU_CONFIG", "rv64")
+# Configs to export (in order of preference)
+CONFIGS = ["rv64", "rv32"]
 
 
 def find_riscv_unified_db() -> Path | None:
@@ -49,28 +49,25 @@ def find_riscv_unified_db() -> Path | None:
     return None
 
 
-def export_data(repo_root: Path):
-    """Export YAML data from generated specs to chatbot data directory."""
+def export_config(repo_root: Path, config: str) -> int:
+    """Export a single config. Returns number of files exported."""
 
-    source_dir = repo_root / "gen" / "resolved_spec" / CONFIG
+    source_dir = repo_root / "gen" / "resolved_spec" / config
+    config_target = TARGET_DIR / config
 
     if not source_dir.exists():
-        print(f"ERROR: Source directory not found: {source_dir}")
-        print(f"\nPlease generate the config first:")
-        print(f"  cd {repo_root}")
-        print(f"  bundle exec rake gen:resolved_arch CFG={CONFIG}")
-        sys.exit(1)
+        print(f"  Skipping {config} (not generated)")
+        return 0
 
-    print(f"Exporting RISC-V data for config: {CONFIG}")
-    print(f"Source: {source_dir}")
-    print(f"Target: {TARGET_DIR}")
+    print(f"\nExporting {config}...")
+    print(f"  Source: {source_dir}")
+    print(f"  Target: {config_target}")
 
-    # Clean target directory
-    if TARGET_DIR.exists():
-        print("Cleaning existing data directory...")
-        shutil.rmtree(TARGET_DIR)
+    # Clean config target directory
+    if config_target.exists():
+        shutil.rmtree(config_target)
 
-    TARGET_DIR.mkdir(parents=True, exist_ok=True)
+    config_target.mkdir(parents=True, exist_ok=True)
 
     # Directories to copy
     dirs_to_copy = ["inst", "csr", "ext"]
@@ -78,20 +75,54 @@ def export_data(repo_root: Path):
 
     for dir_name in dirs_to_copy:
         src = source_dir / dir_name
-        dst = TARGET_DIR / dir_name
+        dst = config_target / dir_name
 
         if not src.exists():
-            print(f"  Skipping {dir_name}/ (not found)")
+            print(f"    Skipping {dir_name}/ (not found)")
             continue
 
-        print(f"  Copying {dir_name}/...")
+        print(f"    Copying {dir_name}/...")
         shutil.copytree(src, dst)
 
         file_count = sum(1 for _ in dst.rglob("*.yaml"))
         total_files += file_count
-        print(f"    -> {file_count} files")
+        print(f"      -> {file_count} files")
 
-    print(f"\nDone! Exported {total_files} YAML files to {TARGET_DIR}")
+    return total_files
+
+
+def export_data(repo_root: Path):
+    """Export YAML data from generated specs to chatbot data directory."""
+
+    print(f"Target directory: {TARGET_DIR}")
+
+    # Clean entire target directory
+    if TARGET_DIR.exists():
+        print("Cleaning existing data directory...")
+        shutil.rmtree(TARGET_DIR)
+
+    TARGET_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Export each config
+    total_files = 0
+    exported_configs = []
+
+    for config in CONFIGS:
+        files = export_config(repo_root, config)
+        if files > 0:
+            total_files += files
+            exported_configs.append(config)
+
+    if not exported_configs:
+        print("\nERROR: No configs were exported!")
+        print("Please generate at least one config first:")
+        print(f"  cd {repo_root}")
+        print("  ./do gen:resolved_arch CFG=rv64")
+        print("  ./do gen:resolved_arch CFG=rv32")
+        sys.exit(1)
+
+    print(f"\nDone! Exported {total_files} YAML files")
+    print(f"Configs: {', '.join(exported_configs)}")
 
 
 def main():
