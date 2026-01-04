@@ -3,6 +3,8 @@
 
 import json
 import os
+import time
+from collections import defaultdict
 from pathlib import Path
 
 import anthropic
@@ -11,6 +13,10 @@ import yaml
 
 DATA_DIR = Path(__file__).parent / "data"
 API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+# Rate limiting: 20 questions per user (by session)
+MAX_QUESTIONS_PER_USER = 20
+user_usage = defaultdict(lambda: {"count": 0, "first_use": time.time()})
 
 _yaml_cache = {}
 _inst_index = []
@@ -41,7 +47,13 @@ def build_indices():
                 db = d.get("definedBy", [])
                 if isinstance(db, str): db = [db]
                 elif isinstance(db, dict): db = db.get("anyOf", db.get("allOf", []))
-                _inst_index.append({"path": str(yf.relative_to(DATA_DIR)), "name": d["name"], "long_name": d.get("long_name", ""), "definedBy": db})
+                _inst_index.append({
+                    "path": str(yf.relative_to(DATA_DIR)), 
+                    "name": d["name"], 
+                    "long_name": d.get("long_name", ""),
+                    "assembly": d.get("assembly", ""),
+                    "definedBy": db
+                })
         except: pass
     
     for yf in (DATA_DIR / "csr").rglob("*.yaml") if (DATA_DIR / "csr").exists() else []:
@@ -50,77 +62,123 @@ def build_indices():
             if d.get("name"):
                 db = d.get("definedBy", [])
                 if isinstance(db, str): db = [db]
-                _csr_index.append({"path": str(yf.relative_to(DATA_DIR)), "name": d["name"], "long_name": d.get("long_name", ""), "definedBy": db})
+                _csr_index.append({
+                    "path": str(yf.relative_to(DATA_DIR)), 
+                    "name": d["name"], 
+                    "long_name": d.get("long_name", ""),
+                    "address": d.get("address"),
+                    "definedBy": db
+                })
         except: pass
     
     for yf in (DATA_DIR / "ext").rglob("*.yaml") if (DATA_DIR / "ext").exists() else []:
         try:
             d = load_yaml(yf)
             if d.get("name") and d.get("kind") == "extension":
-                _ext_index.append({"path": str(yf.relative_to(DATA_DIR)), "name": d["name"], "long_name": d.get("long_name", "")})
+                _ext_index.append({
+                    "path": str(yf.relative_to(DATA_DIR)), 
+                    "name": d["name"], 
+                    "long_name": d.get("long_name", ""),
+                    "description": d.get("description", "")[:200]
+                })
         except: pass
 
 
-# Reduced limits: 10 instead of 20, minimal fields
-def search_instructions(term="", extension="", limit=10):
-    results = [{"name": i["name"], "ext": i["definedBy"][:2]} for i in _inst_index 
-               if (not term or term.lower() in i["name"].lower()) and (not extension or extension in i.get("definedBy", []))]
-    return {"count": len(results), "items": results[:limit]}
+def search_instructions(term="", extension="", limit=20):
+    results = []
+    for i in _inst_index:
+        if term and term.lower() not in i["name"].lower() and term.lower() not in i.get("long_name", "").lower():
+            continue
+        if extension and extension not in i.get("definedBy", []):
+            continue
+        results.append({"name": i["name"], "long_name": i["long_name"], "assembly": i["assembly"], "definedBy": i["definedBy"]})
+        if len(results) >= limit:
+            break
+    return {"count": len(results), "instructions": results}
 
-def search_csrs(term="", extension="", limit=10):
-    results = [{"name": c["name"]} for c in _csr_index 
-               if (not term or term.lower() in c["name"].lower()) and (not extension or extension in c.get("definedBy", []))]
-    return {"count": len(results), "items": results[:limit]}
+def search_csrs(term="", extension="", limit=20):
+    results = []
+    for c in _csr_index:
+        if term and term.lower() not in c["name"].lower() and term.lower() not in c.get("long_name", "").lower():
+            continue
+        if extension and extension not in c.get("definedBy", []):
+            continue
+        results.append({"name": c["name"], "long_name": c["long_name"], "address": c["address"]})
+        if len(results) >= limit:
+            break
+    return {"count": len(results), "csrs": results}
 
 def list_extensions():
-    return {"count": len(_ext_index), "items": [{"name": e["name"]} for e in _ext_index]}
+    return {"count": len(_ext_index), "extensions": [{"name": e["name"], "long_name": e["long_name"]} for e in _ext_index]}
 
 def get_extension_details(name):
     ext = next((e for e in _ext_index if e["name"] == name), None)
-    if not ext: return {"error": f"Not found: {name}"}
-    insts = [i["name"] for i in _inst_index if name in i.get("definedBy", [])][:20]
-    csrs = [c["name"] for c in _csr_index if name in c.get("definedBy", [])][:10]
-    return {"name": name, "long_name": ext.get("long_name", ""), "instructions": insts, "csrs": csrs}
+    if not ext: return {"error": f"Extension '{name}' not found"}
+    insts = [{"name": i["name"], "assembly": i["assembly"]} for i in _inst_index if name in i.get("definedBy", [])][:30]
+    csrs = [{"name": c["name"], "address": c["address"]} for c in _csr_index if name in c.get("definedBy", [])][:20]
+    return {"extension": ext, "instructions": {"count": len(insts), "items": insts}, "csrs": {"count": len(csrs), "items": csrs}}
 
 def get_instruction_details(name):
     inst = next((i for i in _inst_index if i["name"] == name), None)
-    if not inst: return {"error": f"Not found: {name}"}
-    data = load_yaml(DATA_DIR / inst["path"])
-    # Return only essential fields
-    return {k: data.get(k) for k in ["name", "long_name", "assembly", "encoding", "description", "operation()"] if data.get(k)}
+    if not inst: return {"error": f"Instruction '{name}' not found"}
+    return {"instruction": load_yaml(DATA_DIR / inst["path"])}
 
 def get_csr_details(name):
     csr = next((c for c in _csr_index if c["name"] == name), None)
-    if not csr: return {"error": f"Not found: {name}"}
-    data = load_yaml(DATA_DIR / csr["path"])
-    return {k: data.get(k) for k in ["name", "long_name", "address", "priv_mode", "description", "fields"] if data.get(k)}
+    if not csr: return {"error": f"CSR '{name}' not found"}
+    return {"csr": load_yaml(DATA_DIR / csr["path"])}
 
 def get_stats():
-    return {"inst": len(_inst_index), "csr": len(_csr_index), "ext": len(_ext_index)}
+    return {"instructions": len(_inst_index), "csrs": len(_csr_index), "extensions": len(_ext_index)}
 
 
 TOOLS = [
-    {"name": "search_instructions", "description": "Search instructions by name/extension", "input_schema": {"type": "object", "properties": {"term": {"type": "string"}, "extension": {"type": "string"}}}},
-    {"name": "search_csrs", "description": "Search CSRs by name", "input_schema": {"type": "object", "properties": {"term": {"type": "string"}}}},
-    {"name": "list_extensions", "description": "List all extensions", "input_schema": {"type": "object", "properties": {}}},
-    {"name": "get_extension_details", "description": "Get extension info", "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
-    {"name": "get_instruction_details", "description": "Get instruction details", "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
-    {"name": "get_csr_details", "description": "Get CSR details", "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
-    {"name": "get_stats", "description": "Get counts", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "search_instructions", "description": "Search RISC-V instructions by name or filter by extension", 
+     "input_schema": {"type": "object", "properties": {"term": {"type": "string", "description": "Search term"}, "extension": {"type": "string", "description": "Filter by extension (e.g. M, A, F, V)"}}}},
+    {"name": "search_csrs", "description": "Search RISC-V CSRs by name or extension", 
+     "input_schema": {"type": "object", "properties": {"term": {"type": "string"}, "extension": {"type": "string"}}}},
+    {"name": "list_extensions", "description": "List all RISC-V extensions", 
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_extension_details", "description": "Get detailed info about a RISC-V extension including its instructions and CSRs", 
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string", "description": "Extension name (e.g. M, A, V, Zba)"}}, "required": ["name"]}},
+    {"name": "get_instruction_details", "description": "Get complete details about a specific instruction including encoding and operation", 
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string", "description": "Instruction name (e.g. add, mul, lw)"}}, "required": ["name"]}},
+    {"name": "get_csr_details", "description": "Get complete details about a specific CSR including fields", 
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string", "description": "CSR name (e.g. mstatus, mcause)"}}, "required": ["name"]}},
+    {"name": "get_stats", "description": "Get database statistics", 
+     "input_schema": {"type": "object", "properties": {}}},
 ]
 
-TOOL_FNS = {"search_instructions": search_instructions, "search_csrs": search_csrs, "list_extensions": list_extensions,
-            "get_extension_details": get_extension_details, "get_instruction_details": get_instruction_details,
-            "get_csr_details": get_csr_details, "get_stats": get_stats}
+TOOL_FNS = {
+    "search_instructions": search_instructions, 
+    "search_csrs": search_csrs, 
+    "list_extensions": list_extensions,
+    "get_extension_details": get_extension_details, 
+    "get_instruction_details": get_instruction_details,
+    "get_csr_details": get_csr_details, 
+    "get_stats": get_stats
+}
 
-SYSTEM = "RISC-V ISA assistant. Use tools for accurate info. Be concise."
+SYSTEM = """You are a helpful RISC-V ISA assistant with access to a comprehensive database of instructions, CSRs, and extensions.
+
+Use the available tools to look up accurate information. Provide clear, technical explanations with relevant details like encodings, assembly syntax, and extension dependencies."""
 
 
-def ask(question):
+def ask(question, request: gr.Request):
     if not API_KEY:
         return "API key not configured."
     if not _inst_index:
         return "Data not loaded."
+    
+    # Rate limiting by IP
+    user_id = request.client.host if request else "unknown"
+    user = user_usage[user_id]
+    
+    if user["count"] >= MAX_QUESTIONS_PER_USER:
+        return f"You've reached the limit of {MAX_QUESTIONS_PER_USER} questions. Thank you for trying the RISC-V ISA Chatbot!"
+    
+    user["count"] += 1
+    remaining = MAX_QUESTIONS_PER_USER - user["count"]
     
     try:
         client = anthropic.Anthropic(api_key=API_KEY)
@@ -133,30 +191,38 @@ def ask(question):
             for block in response.content:
                 if block.type == "tool_use":
                     result = TOOL_FNS.get(block.name, lambda **x: {"error": "unknown"})(**block.input)
-                    tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result, separators=(',', ':'))})
+                    tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result, default=str)})
             messages.append({"role": "assistant", "content": response.content})
             messages.append({"role": "user", "content": tool_results})
             response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=4096, system=SYSTEM, tools=TOOLS, messages=messages)
         
-        return "".join(b.text for b in response.content if hasattr(b, "text"))
+        answer = "".join(b.text for b in response.content if hasattr(b, "text"))
+        return f"{answer}\n\n---\n*Questions remaining: {remaining}/{MAX_QUESTIONS_PER_USER}*"
+    
     except anthropic.AuthenticationError:
+        user["count"] -= 1  # Don't count failed requests
         return "API key error."
     except Exception as e:
+        user["count"] -= 1
         return f"Error: {e}"
 
 
 print("Loading RISC-V data...")
 build_indices()
 stats = get_stats()
-print(f"Loaded: {stats['inst']} instructions, {stats['csr']} CSRs, {stats['ext']} extensions")
+print(f"Loaded: {stats['instructions']} instructions, {stats['csrs']} CSRs, {stats['extensions']} extensions")
 
 demo = gr.Interface(
     fn=ask,
-    inputs=gr.Textbox(label="Question", placeholder="Ask about RISC-V...", lines=2),
-    outputs=gr.Textbox(label="Answer", lines=12),
+    inputs=gr.Textbox(label="Question", placeholder="Ask about RISC-V instructions, CSRs, or extensions...", lines=2),
+    outputs=gr.Textbox(label="Answer", lines=15),
     title="RISC-V ISA Chatbot",
-    description=f"Ask about RISC-V instructions, CSRs, extensions. Powered by Claude Haiku 4.5.\n\n**Database:** {stats['inst']} instructions | {stats['csr']} CSRs | {stats['ext']} extensions",
-    examples=["What instructions are in the M extension?", "Explain mstatus CSR", "How does ADD work?"],
+    description=f"""Ask questions about RISC-V architecture. Powered by Claude Haiku 4.5.
+
+**Database:** {stats['instructions']} instructions | {stats['csrs']} CSRs | {stats['extensions']} extensions
+
+**Limit:** {MAX_QUESTIONS_PER_USER} questions per user""",
+    examples=["What instructions are in the M extension?", "Explain the mstatus CSR and its fields", "How does the ADD instruction work?", "List all vector extensions"],
     flagging_mode="never",
 )
 
