@@ -1,447 +1,161 @@
 #!/usr/bin/env python3
-"""
-RISC-V ISA Chatbot - HuggingFace Spaces App
-A chatbot that answers questions about RISC-V using Claude Haiku with tool use.
-"""
+"""RISC-V ISA Chatbot - HuggingFace Spaces App"""
 
 import json
 import os
 from pathlib import Path
-from typing import Any
 
 import anthropic
 import gradio as gr
 import yaml
 
-# Data paths
 DATA_DIR = Path(__file__).parent / "data"
-INST_DIR = DATA_DIR / "inst"
-CSR_DIR = DATA_DIR / "csr"
-EXT_DIR = DATA_DIR / "ext"
-
-# Caches
-_yaml_cache: dict[str, Any] = {}
-_inst_index: list[dict] = []
-_csr_index: list[dict] = []
-_ext_index: list[dict] = []
+_yaml_cache = {}
+_inst_index = []
+_csr_index = []
+_ext_index = []
 
 
-def load_yaml(path: Path) -> dict:
-    """Load and cache a YAML file."""
+def load_yaml(path):
     key = str(path)
-    if key in _yaml_cache:
-        return _yaml_cache[key]
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        _yaml_cache[key] = data
-        return data
-    except Exception:
-        return {}
+    if key not in _yaml_cache:
+        try:
+            with open(path) as f:
+                _yaml_cache[key] = yaml.safe_load(f) or {}
+        except:
+            _yaml_cache[key] = {}
+    return _yaml_cache[key]
 
 
 def build_indices():
-    """Build search indices from YAML files."""
     global _inst_index, _csr_index, _ext_index
-
     if not DATA_DIR.exists():
-        print(f"Warning: Data directory not found: {DATA_DIR}")
         return
-
-    # Build instruction index
-    if INST_DIR.exists():
-        for yaml_file in INST_DIR.rglob("*.yaml"):
-            try:
-                data = load_yaml(yaml_file)
-                if data.get("name"):
-                    defined_by = data.get("definedBy", [])
-                    if isinstance(defined_by, str):
-                        defined_by = [defined_by]
-                    elif isinstance(defined_by, dict):
-                        defined_by = defined_by.get("anyOf", defined_by.get("allOf", []))
-
-                    _inst_index.append({
-                        "path": str(yaml_file.relative_to(DATA_DIR)),
-                        "name": data.get("name"),
-                        "long_name": data.get("long_name", ""),
-                        "assembly": data.get("assembly", ""),
-                        "encoding": data.get("encoding", {}).get("match", "") if isinstance(data.get("encoding"), dict) else "",
-                        "description": data.get("description", ""),
-                        "definedBy": defined_by,
-                    })
-            except Exception:
-                pass
-
-    # Build CSR index
-    if CSR_DIR.exists():
-        for yaml_file in CSR_DIR.rglob("*.yaml"):
-            try:
-                data = load_yaml(yaml_file)
-                if data.get("name"):
-                    defined_by = data.get("definedBy", [])
-                    if isinstance(defined_by, str):
-                        defined_by = [defined_by]
-
-                    _csr_index.append({
-                        "path": str(yaml_file.relative_to(DATA_DIR)),
-                        "name": data.get("name"),
-                        "long_name": data.get("long_name", ""),
-                        "address": data.get("address"),
-                        "priv_mode": data.get("priv_mode", ""),
-                        "description": data.get("description", ""),
-                        "definedBy": defined_by,
-                    })
-            except Exception:
-                pass
-
-    # Build extension index
-    if EXT_DIR.exists():
-        for yaml_file in EXT_DIR.rglob("*.yaml"):
-            try:
-                data = load_yaml(yaml_file)
-                if data.get("name") and data.get("kind") == "extension":
-                    _ext_index.append({
-                        "path": str(yaml_file.relative_to(DATA_DIR)),
-                        "name": data.get("name"),
-                        "long_name": data.get("long_name", ""),
-                        "description": data.get("description", ""),
-                        "version": data.get("version"),
-                    })
-            except Exception:
-                pass
+    
+    for yf in (DATA_DIR / "inst").rglob("*.yaml") if (DATA_DIR / "inst").exists() else []:
+        try:
+            d = load_yaml(yf)
+            if d.get("name"):
+                db = d.get("definedBy", [])
+                if isinstance(db, str): db = [db]
+                elif isinstance(db, dict): db = db.get("anyOf", db.get("allOf", []))
+                _inst_index.append({"path": str(yf.relative_to(DATA_DIR)), "name": d["name"], "long_name": d.get("long_name", ""), "definedBy": db})
+        except: pass
+    
+    for yf in (DATA_DIR / "csr").rglob("*.yaml") if (DATA_DIR / "csr").exists() else []:
+        try:
+            d = load_yaml(yf)
+            if d.get("name"):
+                db = d.get("definedBy", [])
+                if isinstance(db, str): db = [db]
+                _csr_index.append({"path": str(yf.relative_to(DATA_DIR)), "name": d["name"], "long_name": d.get("long_name", ""), "definedBy": db})
+        except: pass
+    
+    for yf in (DATA_DIR / "ext").rglob("*.yaml") if (DATA_DIR / "ext").exists() else []:
+        try:
+            d = load_yaml(yf)
+            if d.get("name") and d.get("kind") == "extension":
+                _ext_index.append({"path": str(yf.relative_to(DATA_DIR)), "name": d["name"], "long_name": d.get("long_name", "")})
+        except: pass
 
 
-# Tool implementations
-def search_instructions(term: str = "", extension: str = "", limit: int = 20) -> dict:
-    """Search RISC-V instructions by name or extension."""
-    results = []
-    term_lower = term.lower() if term else ""
+def search_instructions(term="", extension="", limit=20):
+    results = [i for i in _inst_index if (not term or term.lower() in i["name"].lower()) and (not extension or extension in i.get("definedBy", []))]
+    return {"count": len(results[:limit]), "instructions": results[:limit]}
 
-    for inst in _inst_index:
-        if term_lower:
-            if term_lower not in inst["name"].lower() and term_lower not in inst.get("long_name", "").lower():
-                continue
-        if extension:
-            if extension not in inst.get("definedBy", []):
-                continue
-        results.append(inst)
-        if len(results) >= limit:
-            break
+def search_csrs(term="", extension="", limit=20):
+    results = [c for c in _csr_index if (not term or term.lower() in c["name"].lower()) and (not extension or extension in c.get("definedBy", []))]
+    return {"count": len(results[:limit]), "csrs": results[:limit]}
 
-    return {"count": len(results), "instructions": results}
-
-
-def search_csrs(term: str = "", extension: str = "", limit: int = 20) -> dict:
-    """Search RISC-V CSRs (Control and Status Registers)."""
-    results = []
-    term_lower = term.lower() if term else ""
-
-    for csr in _csr_index:
-        if term_lower:
-            if term_lower not in csr["name"].lower() and term_lower not in csr.get("long_name", "").lower():
-                continue
-        if extension:
-            if extension not in csr.get("definedBy", []):
-                continue
-        results.append(csr)
-        if len(results) >= limit:
-            break
-
-    return {"count": len(results), "csrs": results}
-
-
-def list_extensions() -> dict:
-    """List all RISC-V extensions."""
+def list_extensions():
     return {"count": len(_ext_index), "extensions": _ext_index}
 
+def get_extension_details(name):
+    ext = next((e for e in _ext_index if e["name"] == name), None)
+    if not ext: return {"error": f"Extension '{name}' not found"}
+    return {"extension": ext, "instructions": [i for i in _inst_index if name in i.get("definedBy", [])][:30], "csrs": [c for c in _csr_index if name in c.get("definedBy", [])][:30]}
 
-def get_extension_details(name: str) -> dict:
-    """Get detailed info about a specific extension."""
-    ext_info = None
-    for ext in _ext_index:
-        if ext["name"] == name:
-            ext_info = ext
-            break
+def get_instruction_details(name):
+    inst = next((i for i in _inst_index if i["name"] == name), None)
+    if not inst: return {"error": f"Instruction '{name}' not found"}
+    return {"instruction": load_yaml(DATA_DIR / inst["path"])}
 
-    if not ext_info:
-        return {"error": f"Extension '{name}' not found"}
+def get_csr_details(name):
+    csr = next((c for c in _csr_index if c["name"] == name), None)
+    if not csr: return {"error": f"CSR '{name}' not found"}
+    return {"csr": load_yaml(DATA_DIR / csr["path"])}
 
-    instructions = [inst for inst in _inst_index if name in inst.get("definedBy", [])]
-    csrs = [csr for csr in _csr_index if name in csr.get("definedBy", [])]
-
-    return {
-        "extension": ext_info,
-        "instructions": {"count": len(instructions), "items": instructions[:50]},
-        "csrs": {"count": len(csrs), "items": csrs[:50]},
-    }
+def get_stats():
+    return {"instructions": len(_inst_index), "csrs": len(_csr_index), "extensions": len(_ext_index)}
 
 
-def get_instruction_details(name: str) -> dict:
-    """Get full details about a specific instruction."""
-    for inst in _inst_index:
-        if inst["name"] == name:
-            yaml_path = DATA_DIR / inst["path"]
-            full_data = load_yaml(yaml_path)
-            return {"instruction": full_data}
-    return {"error": f"Instruction '{name}' not found"}
-
-
-def get_csr_details(name: str) -> dict:
-    """Get full details about a specific CSR."""
-    for csr in _csr_index:
-        if csr["name"] == name:
-            yaml_path = DATA_DIR / csr["path"]
-            full_data = load_yaml(yaml_path)
-            return {"csr": full_data}
-    return {"error": f"CSR '{name}' not found"}
-
-
-def get_stats() -> dict:
-    """Get database statistics."""
-    return {
-        "instructions": len(_inst_index),
-        "csrs": len(_csr_index),
-        "extensions": len(_ext_index),
-    }
-
-
-# Claude tools definition
 TOOLS = [
-    {
-        "name": "search_instructions",
-        "description": "Search RISC-V instructions by name keyword or filter by extension.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "term": {"type": "string", "description": "Search term to match in instruction name"},
-                "extension": {"type": "string", "description": "Filter by extension name (e.g., 'M', 'A', 'F', 'V')"},
-                "limit": {"type": "integer", "description": "Maximum results (default: 20)", "default": 20}
-            }
-        }
-    },
-    {
-        "name": "search_csrs",
-        "description": "Search RISC-V Control and Status Registers by name or extension.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "term": {"type": "string", "description": "Search term to match in CSR name"},
-                "extension": {"type": "string", "description": "Filter by extension name"},
-                "limit": {"type": "integer", "description": "Maximum results", "default": 20}
-            }
-        }
-    },
-    {
-        "name": "list_extensions",
-        "description": "List all available RISC-V extensions.",
-        "input_schema": {"type": "object", "properties": {}}
-    },
-    {
-        "name": "get_extension_details",
-        "description": "Get detailed information about a specific RISC-V extension.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"name": {"type": "string", "description": "Extension name (e.g., 'M', 'A', 'V')"}},
-            "required": ["name"]
-        }
-    },
-    {
-        "name": "get_instruction_details",
-        "description": "Get complete details about a specific instruction.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"name": {"type": "string", "description": "Instruction name (e.g., 'add', 'mul')"}},
-            "required": ["name"]
-        }
-    },
-    {
-        "name": "get_csr_details",
-        "description": "Get complete details about a specific CSR.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"name": {"type": "string", "description": "CSR name (e.g., 'mstatus')"}},
-            "required": ["name"]
-        }
-    },
-    {
-        "name": "get_stats",
-        "description": "Get statistics about the RISC-V ISA database.",
-        "input_schema": {"type": "object", "properties": {}}
-    }
+    {"name": "search_instructions", "description": "Search RISC-V instructions", "input_schema": {"type": "object", "properties": {"term": {"type": "string"}, "extension": {"type": "string"}}}},
+    {"name": "search_csrs", "description": "Search RISC-V CSRs", "input_schema": {"type": "object", "properties": {"term": {"type": "string"}, "extension": {"type": "string"}}}},
+    {"name": "list_extensions", "description": "List RISC-V extensions", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_extension_details", "description": "Get extension details", "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
+    {"name": "get_instruction_details", "description": "Get instruction details", "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
+    {"name": "get_csr_details", "description": "Get CSR details", "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
+    {"name": "get_stats", "description": "Get database stats", "input_schema": {"type": "object", "properties": {}}},
 ]
 
-TOOL_FUNCTIONS = {
-    "search_instructions": search_instructions,
-    "search_csrs": search_csrs,
-    "list_extensions": list_extensions,
-    "get_extension_details": get_extension_details,
-    "get_instruction_details": get_instruction_details,
-    "get_csr_details": get_csr_details,
-    "get_stats": get_stats,
-}
+TOOL_FNS = {"search_instructions": search_instructions, "search_csrs": search_csrs, "list_extensions": list_extensions,
+            "get_extension_details": get_extension_details, "get_instruction_details": get_instruction_details,
+            "get_csr_details": get_csr_details, "get_stats": get_stats}
+
+SYSTEM = "You are a RISC-V ISA assistant. Use tools to look up accurate information about instructions, CSRs, and extensions."
 
 
-def process_tool_call(tool_name: str, tool_input: dict) -> str:
-    """Execute a tool and return the result as JSON string."""
-    if tool_name not in TOOL_FUNCTIONS:
-        return json.dumps({"error": f"Unknown tool: {tool_name}"})
-    try:
-        result = TOOL_FUNCTIONS[tool_name](**tool_input)
-        return json.dumps(result, indent=2, default=str)
-    except Exception as e:
-        return json.dumps({"error": str(e)})
-
-
-SYSTEM_PROMPT = """You are a helpful assistant that answers questions about the RISC-V Instruction Set Architecture (ISA).
-
-You have access to a database containing:
-- 1150+ RISC-V instructions with encodings, assembly syntax, and descriptions
-- 380+ Control and Status Registers (CSRs) with fields and access modes
-- 145 RISC-V extensions (base ISA, standard extensions, and ratified extensions)
-
-When users ask about RISC-V:
-1. Use the search and lookup tools to find accurate information
-2. Provide clear, technical explanations
-3. Include relevant details like instruction encodings, CSR addresses, or extension dependencies
-
-Always use tools to look up specific instruction details rather than relying on memory."""
-
-
-def chat_with_claude(message: str, history: list[dict], api_key: str) -> tuple[list[dict], list[dict]]:
-    """Process a chat message using Claude Haiku with tools."""
-
+def ask(question, api_key):
     if not api_key:
-        history.append({"role": "assistant", "content": "Please enter your Anthropic API key in the settings below."})
-        return history, history
-
+        return "Please provide your Anthropic API key."
     if not _inst_index:
-        history.append({"role": "assistant", "content": "Data not loaded. Please ensure the RISC-V data files are present."})
-        return history, history
-
-    # Add user message to history
-    history.append({"role": "user", "content": message})
-
+        return "Data not loaded."
+    
     try:
         client = anthropic.Anthropic(api_key=api_key)
-
-        # Convert history to Claude format (filter to just user/assistant with content strings)
-        messages = []
-        for msg in history:
-            if msg["role"] in ("user", "assistant") and isinstance(msg.get("content"), str):
-                messages.append({"role": msg["role"], "content": msg["content"]})
-
-        # Initial API call
-        response = client.messages.create(
-            model="claude-haiku-4-20250514",
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            messages=messages,
-        )
-
-        # Handle tool use loop
+        messages = [{"role": "user", "content": question}]
+        
+        response = client.messages.create(model="claude-haiku-4-20250514", max_tokens=4096, system=SYSTEM, tools=TOOLS, messages=messages)
+        
         while response.stop_reason == "tool_use":
-            tool_uses = [block for block in response.content if block.type == "tool_use"]
             tool_results = []
-
-            for tool_use in tool_uses:
-                result = process_tool_call(tool_use.name, tool_use.input)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_use.id,
-                    "content": result,
-                })
-
+            for block in response.content:
+                if block.type == "tool_use":
+                    result = TOOL_FNS.get(block.name, lambda **x: {"error": "unknown"})(**block.input)
+                    tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result, default=str)})
             messages.append({"role": "assistant", "content": response.content})
             messages.append({"role": "user", "content": tool_results})
-
-            response = client.messages.create(
-                model="claude-haiku-4-20250514",
-                max_tokens=4096,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=messages,
-            )
-
-        # Extract final text response
-        final_text = ""
-        for block in response.content:
-            if hasattr(block, "text"):
-                final_text += block.text
-
-        history.append({"role": "assistant", "content": final_text})
-        return history, history
-
+            response = client.messages.create(model="claude-haiku-4-20250514", max_tokens=4096, system=SYSTEM, tools=TOOLS, messages=messages)
+        
+        return "".join(b.text for b in response.content if hasattr(b, "text"))
     except anthropic.AuthenticationError:
-        history.append({"role": "assistant", "content": "Invalid API key. Please check your Anthropic API key."})
-        return history, history
+        return "Invalid API key."
     except Exception as e:
-        history.append({"role": "assistant", "content": f"Error: {str(e)}"})
-        return history, history
+        return f"Error: {e}"
 
 
-# Initialize data on module load
 print("Loading RISC-V data...")
 build_indices()
-print(f"Loaded: {len(_inst_index)} instructions, {len(_csr_index)} CSRs, {len(_ext_index)} extensions")
-
-# Get stats for display
 stats = get_stats()
+print(f"Loaded: {stats['instructions']} instructions, {stats['csrs']} CSRs, {stats['extensions']} extensions")
 
-# Build the Gradio interface
-with gr.Blocks(title="RISC-V ISA Chatbot", theme=gr.themes.Soft()) as demo:
-    gr.Markdown(f"""
-    # RISC-V ISA Chatbot
+demo = gr.Interface(
+    fn=ask,
+    inputs=[
+        gr.Textbox(label="Question", placeholder="Ask about RISC-V instructions, CSRs, or extensions...", lines=2),
+        gr.Textbox(label="Anthropic API Key", type="password", value=os.environ.get("ANTHROPIC_API_KEY", "")),
+    ],
+    outputs=gr.Textbox(label="Answer", lines=10),
+    title="RISC-V ISA Chatbot",
+    description=f"Ask questions about RISC-V. Database: {stats['instructions']} instructions, {stats['csrs']} CSRs, {stats['extensions']} extensions.",
+    examples=[
+        ["What instructions are in the M extension?", ""],
+        ["Explain the mstatus CSR", ""],
+        ["How does the ADD instruction work?", ""],
+    ],
+    allow_flagging="never",
+)
 
-    Ask questions about RISC-V instructions, CSRs, and extensions. Powered by Claude Haiku.
-
-    **Database:** {stats['instructions']} instructions | {stats['csrs']} CSRs | {stats['extensions']} extensions
-
-    **Examples:**
-    - "What instructions are in the M extension?"
-    - "Explain the mstatus CSR and its fields"
-    - "How does the ADD instruction work?"
-    """)
-
-    chatbot = gr.Chatbot(
-        label="Chat",
-        height=450,
-        type="messages",
-    )
-
-    with gr.Row():
-        msg = gr.Textbox(
-            label="Your question",
-            placeholder="Ask about RISC-V instructions, CSRs, or extensions...",
-            scale=4,
-            show_label=False,
-        )
-        submit = gr.Button("Send", variant="primary", scale=1)
-
-    with gr.Accordion("Settings", open=False):
-        api_key = gr.Textbox(
-            label="Anthropic API Key",
-            placeholder="sk-ant-...",
-            type="password",
-            value=os.environ.get("ANTHROPIC_API_KEY", ""),
-        )
-        gr.Markdown("Get your API key from [console.anthropic.com](https://console.anthropic.com/)")
-
-    # State to store conversation history
-    state = gr.State([])
-
-    # Event handlers
-    def respond(message, history, api_key):
-        if not message.strip():
-            return "", history, history
-        new_history, new_state = chat_with_claude(message, history, api_key)
-        return "", new_history, new_state
-
-    submit.click(respond, [msg, state, api_key], [msg, chatbot, state])
-    msg.submit(respond, [msg, state, api_key], [msg, chatbot, state])
-
-    gr.Markdown("---\n*Data: [RISC-V Unified Database](https://github.com/riscv-software-src/riscv-unified-db)*")
-
-# Launch for HuggingFace Spaces
 if __name__ == "__main__":
     demo.launch()
