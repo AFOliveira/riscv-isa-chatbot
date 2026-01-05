@@ -18,6 +18,7 @@ import yaml
 
 DATA_DIR = Path(__file__).parent / "data"
 API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
 # Rate limiting: 20 questions per user (by session)
 MAX_QUESTIONS_PER_USER = 20
@@ -231,14 +232,19 @@ def search_isa_manual(query):
     ISA_MANUAL_REPO = "riscv/riscv-isa-manual"
 
     try:
-        # Use GitHub code search API (no auth needed for public repos)
+        # Use GitHub code search API
         encoded_query = urllib.parse.quote(f"{query} repo:{ISA_MANUAL_REPO}")
         url = f"https://api.github.com/search/code?q={encoded_query}&per_page=5"
 
-        req = urllib.request.Request(url, headers={
+        headers = {
             "Accept": "application/vnd.github.v3+json",
             "User-Agent": "RISC-V-ISA-Chatbot"
-        })
+        }
+        # Add auth token if available (increases rate limit from 60 to 5000/hour)
+        if GITHUB_TOKEN:
+            headers["Authorization"] = f"token {GITHUB_TOKEN}"
+
+        req = urllib.request.Request(url, headers=headers)
 
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode())
@@ -256,10 +262,13 @@ def search_isa_manual(query):
             file_url = item.get("url")
             if file_url:
                 try:
-                    req2 = urllib.request.Request(file_url, headers={
+                    file_headers = {
                         "Accept": "application/vnd.github.v3+json",
                         "User-Agent": "RISC-V-ISA-Chatbot"
-                    })
+                    }
+                    if GITHUB_TOKEN:
+                        file_headers["Authorization"] = f"token {GITHUB_TOKEN}"
+                    req2 = urllib.request.Request(file_url, headers=file_headers)
                     with urllib.request.urlopen(req2, timeout=5) as resp:
                         file_data = json.loads(resp.read().decode())
                         # Decode base64 content and get relevant snippet
