@@ -3,9 +3,12 @@
 Data from RISC-V Unified Database (UDB): https://github.com/riscv-software-src/riscv-unified-db
 """
 
+import base64
 import json
 import os
 import time
+import urllib.request
+import urllib.parse
 from collections import defaultdict
 from pathlib import Path
 
@@ -223,7 +226,82 @@ def get_stats(config):
     }
 
 
-TOOLS = [
+def search_isa_manual(query):
+    """Search the official RISC-V ISA Manual on GitHub."""
+    ISA_MANUAL_REPO = "riscv/riscv-isa-manual"
+
+    try:
+        # Use GitHub code search API (no auth needed for public repos)
+        encoded_query = urllib.parse.quote(f"{query} repo:{ISA_MANUAL_REPO}")
+        url = f"https://api.github.com/search/code?q={encoded_query}&per_page=5"
+
+        req = urllib.request.Request(url, headers={
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "RISC-V-ISA-Chatbot"
+        })
+
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+
+        if not data.get("items"):
+            return {
+                "source": "RISC-V ISA Manual (GitHub)",
+                "found": False,
+                "message": f"No results found for '{query}' in the official ISA Manual."
+            }
+
+        results = []
+        for item in data["items"][:5]:
+            # Fetch file content snippet
+            file_url = item.get("url")
+            if file_url:
+                try:
+                    req2 = urllib.request.Request(file_url, headers={
+                        "Accept": "application/vnd.github.v3+json",
+                        "User-Agent": "RISC-V-ISA-Chatbot"
+                    })
+                    with urllib.request.urlopen(req2, timeout=5) as resp:
+                        file_data = json.loads(resp.read().decode())
+                        # Decode base64 content and get relevant snippet
+                        content = base64.b64decode(file_data.get("content", "")).decode("utf-8", errors="ignore")
+                        # Find relevant lines containing the query
+                        lines = content.split("\n")
+                        relevant_lines = []
+                        for i, line in enumerate(lines):
+                            if query.lower() in line.lower():
+                                start = max(0, i - 2)
+                                end = min(len(lines), i + 3)
+                                relevant_lines.extend(lines[start:end])
+                                if len(relevant_lines) > 15:
+                                    break
+                        snippet = "\n".join(relevant_lines[:15]) if relevant_lines else content[:500]
+                except:
+                    snippet = ""
+
+            results.append({
+                "file": item.get("path", ""),
+                "url": item.get("html_url", ""),
+                "snippet": snippet[:800] if snippet else ""
+            })
+
+        return {
+            "source": "RISC-V ISA Manual (GitHub)",
+            "repo_url": f"https://github.com/{ISA_MANUAL_REPO}",
+            "found": True,
+            "count": len(results),
+            "results": results
+        }
+
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            return {"source": "RISC-V ISA Manual", "error": "GitHub API rate limit reached. Try again later."}
+        return {"source": "RISC-V ISA Manual", "error": f"GitHub API error: {e.code}"}
+    except Exception as e:
+        return {"source": "RISC-V ISA Manual", "error": str(e)}
+
+
+# Local database tools (always available)
+LOCAL_TOOLS = [
     {"name": "search_instructions", "description": "Search RISC-V instructions by name or filter by extension",
      "input_schema": {"type": "object", "properties": {"term": {"type": "string", "description": "Search term"}, "extension": {"type": "string", "description": "Filter by extension (e.g. M, A, F, V)"}}}},
     {"name": "search_csrs", "description": "Search RISC-V CSRs by name or extension",
@@ -240,6 +318,12 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {}}},
 ]
 
+# External tool (optional, requires local search first)
+EXTERNAL_TOOL = {"name": "search_isa_manual", "description": "Search the official RISC-V ISA Manual on GitHub for information not in the local database. Use this ONLY AFTER searching local tools first. Results are from an EXTERNAL source and should be clearly attributed.",
+     "input_schema": {"type": "object", "properties": {"query": {"type": "string", "description": "Search query (e.g. 'fence.i rationale', 'memory ordering', 'trap handling')"}}, "required": ["query"]}}
+
+LOCAL_TOOL_NAMES = {t["name"] for t in LOCAL_TOOLS}
+
 TOOL_FNS = {
     "search_instructions": lambda config, **x: search_instructions(config, **x),
     "search_csrs": lambda config, **x: search_csrs(config, **x),
@@ -247,15 +331,39 @@ TOOL_FNS = {
     "get_extension_details": lambda config, **x: get_extension_details(config, **x),
     "get_instruction_details": lambda config, **x: get_instruction_details(config, **x),
     "get_csr_details": lambda config, **x: get_csr_details(config, **x),
-    "get_stats": lambda config, **x: get_stats(config)
+    "get_stats": lambda config, **x: get_stats(config),
+    "search_isa_manual": lambda config, **x: search_isa_manual(**x)
 }
 
-SYSTEM = """You are a helpful RISC-V ISA assistant with access to a comprehensive database of instructions, CSRs, and extensions from the RISC-V Unified Database (UDB).
+SYSTEM_BASE = """You are a helpful RISC-V ISA assistant with access to a comprehensive database of instructions, CSRs, and extensions from the RISC-V Unified Database (UDB).
 
 Use the available tools to look up accurate information. Provide clear, technical explanations with relevant details like encodings, assembly syntax, and extension dependencies."""
 
+SYSTEM_LOCAL_ONLY = SYSTEM_BASE + """
 
-def ask(question, config, request: gr.Request):
+You only have access to local database tools. Use them to answer questions about RISC-V instructions, CSRs, and extensions."""
+
+SYSTEM_WITH_EXTERNAL = SYSTEM_BASE + """
+
+DATA SOURCES:
+- Local Database (PRIMARY): search_instructions, search_csrs, get_instruction_details, get_csr_details, get_extension_details, list_extensions, get_stats
+- External (SECONDARY): search_isa_manual - searches the official RISC-V ISA Manual on GitHub
+
+IMPORTANT - SEARCH ORDER:
+1. ALWAYS search the local database first using the appropriate local tools
+2. Review what the local database returned (instructions, CSRs, extensions found)
+3. ONLY THEN, if needed, use search_isa_manual to find additional context
+4. When using external results, clearly state: "According to the official RISC-V ISA Manual (external source): ..."
+
+Use search_isa_manual ONLY when:
+- Local tools returned no results or incomplete information for the query
+- User explicitly asks about design rationale, history, or "why" questions
+- User asks about topics not covered by instruction/CSR/extension data (e.g., memory model, ABI, toolchain)
+
+NEVER skip the local database search. Always check local data first."""
+
+
+def ask(question, config, enable_external, request: gr.Request):
     if not API_KEY:
         return "API key not configured."
     if not _config_data:
@@ -275,24 +383,69 @@ def ask(question, config, request: gr.Request):
         client = anthropic.Anthropic(api_key=API_KEY)
         messages = [{"role": "user", "content": f"[Using {config} profile] {question}"}]
 
-        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=4096, system=SYSTEM, tools=TOOLS, messages=messages)
+        # Track state for enforced ordering
+        local_tool_used = False
+        local_results_summary = []
+
+        # Start with local tools only
+        if enable_external:
+            system_prompt = SYSTEM_WITH_EXTERNAL
+            # Initially only provide local tools; external added after local is used
+            current_tools = LOCAL_TOOLS.copy()
+        else:
+            system_prompt = SYSTEM_LOCAL_ONLY
+            current_tools = LOCAL_TOOLS.copy()
+
+        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=4096, system=system_prompt, tools=current_tools, messages=messages)
 
         while response.stop_reason == "tool_use":
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
-                    fn = TOOL_FNS.get(block.name)
-                    if fn:
-                        result = fn(config, **block.input)
+                    tool_name = block.name
+
+                    # Check if this is a local tool
+                    if tool_name in LOCAL_TOOL_NAMES:
+                        local_tool_used = True
+                        fn = TOOL_FNS.get(tool_name)
+                        if fn:
+                            result = fn(config, **block.input)
+                            # Summarize local results for context
+                            local_results_summary.append({"tool": tool_name, "input": block.input, "result_preview": str(result)[:200]})
+                        else:
+                            result = {"error": "unknown tool"}
+
+                    elif tool_name == "search_isa_manual":
+                        # External tool - only allow if local was searched first
+                        if not local_tool_used:
+                            result = {
+                                "error": "You must search the local database first before using external search.",
+                                "hint": "Use search_instructions, search_csrs, or other local tools first."
+                            }
+                        else:
+                            fn = TOOL_FNS.get(tool_name)
+                            # Add local context to the result
+                            result = fn(config, **block.input)
+                            result["local_context"] = f"Local database was searched first. Found: {len(local_results_summary)} local results."
                     else:
                         result = {"error": "unknown tool"}
+
                     tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result, default=str)})
+
             messages.append({"role": "assistant", "content": response.content})
             messages.append({"role": "user", "content": tool_results})
-            response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=4096, system=SYSTEM, tools=TOOLS, messages=messages)
+
+            # After local tool is used, add external tool if enabled
+            if enable_external and local_tool_used and EXTERNAL_TOOL not in current_tools:
+                current_tools = LOCAL_TOOLS + [EXTERNAL_TOOL]
+
+            response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=4096, system=system_prompt, tools=current_tools, messages=messages)
 
         answer = "".join(b.text for b in response.content if hasattr(b, "text"))
-        return f"{answer}\n\n---\n*Profile: {config} | Questions remaining: {remaining}/{MAX_QUESTIONS_PER_USER}*"
+
+        # Add source indicator
+        source_note = "Local DB only" if not enable_external else "Local DB + ISA Manual"
+        return f"{answer}\n\n---\n*Profile: {config} | Source: {source_note} | Questions remaining: {remaining}/{MAX_QUESTIONS_PER_USER}*"
 
     except anthropic.AuthenticationError:
         user["count"] -= 1
@@ -340,6 +493,11 @@ Ask questions about RISC-V instructions, CSRs, and extensions. Powered by Claude
             label="ISA Profile",
             info="Select RISC-V base architecture"
         )
+        enable_external = gr.Checkbox(
+            label="Search ISA Manual",
+            value=False,
+            info="Enable external search of official RISC-V ISA Manual (GitHub) when local data is insufficient"
+        )
 
     question = gr.Textbox(label="Question", placeholder="Ask about RISC-V instructions, CSRs, or extensions...", lines=2)
     submit = gr.Button("Ask", variant="primary")
@@ -356,8 +514,8 @@ Ask questions about RISC-V instructions, CSRs, and extensions. Powered by Claude
         inputs=question,
     )
 
-    submit.click(fn=ask, inputs=[question, config], outputs=answer)
-    question.submit(fn=ask, inputs=[question, config], outputs=answer)
+    submit.click(fn=ask, inputs=[question, config, enable_external], outputs=answer)
+    question.submit(fn=ask, inputs=[question, config, enable_external], outputs=answer)
 
     gr.Markdown("""
 ---
